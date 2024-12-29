@@ -4,9 +4,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import searchengine.services.IndexingService;
 import searchengine.dto.statistics.StatisticsResponse;
 import searchengine.services.StatisticsService;
-import searchengine.services.IndexingService;
 
 @RestController
 @RequestMapping("/api")
@@ -32,6 +32,7 @@ public class ApiController {
         }
 
         if (indexingService.startIndexing()) {
+            indexingService.performIndexing(); // Запуск сервиса индексации сайтов
             return ResponseEntity.ok("{\"result\": true}");
         } else {
             return ResponseEntity.badRequest().body("{\"result\": false, \"error\": \"Не удалось запустить индексацию\"}");

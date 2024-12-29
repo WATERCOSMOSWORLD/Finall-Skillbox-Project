@@ -4,37 +4,47 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Entity
-@Table(name = "site")
+@Table(name = "site", indexes = @Index(name = "idx_url", columnList = "url"))
 @Getter
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
-@ToString
 public class Site {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Integer id;  // Изменен на Integer вместо int
+    private Integer id;
 
-    @Column(columnDefinition = "ENUM('INDEXING', 'INDEXED', 'FAILED')", nullable = false)
     @Enumerated(EnumType.STRING)
+    @Column(columnDefinition = "ENUM('INDEXING', 'INDEXED', 'FAILED')", nullable = false)
     private Status status;
 
     @Column(name = "status_time", nullable = false)
     private LocalDateTime statusTime;
 
     @Column(name = "last_error", columnDefinition = "TEXT")
-    private String lastError;  // Хранение информации об ошибке
+    private String lastError;
 
-    @Column(columnDefinition = "VARCHAR(255)", nullable = false, unique = true)
-    private String url;  // Уникальный URL сайта
+    @Column(length = 255, nullable = false, unique = true)
+    private String url;
 
-    @Column(columnDefinition = "VARCHAR(255)", nullable = false)
-    private String name;  // Имя сайта
+    @Column(length = 255, nullable = false)
+    private String name;
 
-    @ManyToOne
-    @JoinColumn(name = "parent_site_id", nullable = true)
-    private Site parentSite;  // Связь с родительским сайтом (если есть)
+    @OneToMany(mappedBy = "site", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<Page> pages;
+
+    @Override
+    public String toString() {
+        return "Site{" +
+                "id=" + id +
+                ", status=" + status +
+                ", statusTime=" + statusTime +
+                ", url='" + url + '\'' +
+                ", name='" + name + '\'' +
+                '}';
+    }
 }

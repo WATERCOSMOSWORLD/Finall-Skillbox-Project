@@ -4,9 +4,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import searchengine.config.SitesList;
 import searchengine.model.Site;
+import searchengine.model.Status;
 import searchengine.repositories.PageRepository;
 import searchengine.repositories.SiteRepository;
 
+import java.time.LocalDateTime;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
@@ -38,6 +40,10 @@ public class IndexingService {
             for (searchengine.config.Site siteConfig : sitesList.getSites()) {
                 System.out.println("Удаление данных сайта: " + siteConfig.getUrl());
                 deleteSiteData(siteConfig.getUrl());
+
+                System.out.println("Создание новой записи для сайта: " + siteConfig.getUrl());
+                createSiteEntry(siteConfig.getName(), siteConfig.getUrl());
+
                 System.out.println("Индексация сайта: " + siteConfig.getUrl());
                 Thread.sleep(1000);
             }
@@ -56,5 +62,14 @@ public class IndexingService {
             pageRepository.deleteAllBySite(site);
             siteRepository.delete(site);
         }
+    }
+
+    private void createSiteEntry(String name, String url) {
+        Site site = new Site();
+        site.setName(name);
+        site.setUrl(url);
+        site.setStatus(Status.INDEXING);
+        site.setStatusTime(LocalDateTime.now());
+        siteRepository.save(site);
     }
 }

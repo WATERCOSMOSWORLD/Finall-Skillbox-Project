@@ -84,7 +84,8 @@ public class IndexingService {
             logger.info("Удалено старых страниц: {}", deletedPages);
             Site site = createSiteEntry(siteConfig.getName(), siteConfig.getUrl());
             logger.info("Создана новая запись сайта: {}", site.getUrl());
-            int indexedPages = pageCrawlerService.crawl(site);
+            pageCrawlerService.crawl(site); // Метод crawl больше не возвращает int
+            int indexedPages = pageCrawlerService.getVisitedCount(); // Новый метод для получения количества страниц
             logger.info("Проиндексировано страниц: {}", indexedPages);
             site.setStatus(Status.INDEXED);
             site.setStatusTime(LocalDateTime.now());
@@ -94,6 +95,7 @@ public class IndexingService {
             handleFailedSite(siteConfig.getUrl(), e.getMessage());
         }
     }
+
 
     @Transactional
     private int deleteSiteData(String siteUrl) {

@@ -16,9 +16,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.RecursiveAction;
+import java.util.concurrent.*;
 
 @Service
 public class PageCrawlerService {
@@ -29,7 +27,7 @@ public class PageCrawlerService {
 
     private final PageRepository pageRepository;
     private final SiteRepository siteRepository;
-    private final ForkJoinPool forkJoinPool = new ForkJoinPool(MAX_THREADS);
+    private final ExecutorService executorService = Executors.newFixedThreadPool(MAX_THREADS);
     private final Set<String> visitedUrls = ConcurrentHashMap.newKeySet();
     private final Set<String> alreadyLogged = ConcurrentHashMap.newKeySet(); // Для логирования только один раз
 
@@ -38,15 +36,36 @@ public class PageCrawlerService {
         this.siteRepository = siteRepository;
     }
 
+    public void crawlAll(List<Site> sites) {
+        List<Future<?>> futures = new ArrayList<>();
+        for (Site site : sites) {
+            futures.add(executorService.submit(() -> crawl(site)));
+        }
+        for (Future<?> future : futures) {
+            try {
+                future.get();
+            } catch (InterruptedException | ExecutionException e) {
+                logger.error("Ошибка при выполнении обхода сайта: {}", e.getMessage());
+            }
+        }
+        executorService.shutdown();
+    }
+
     public int crawl(Site site) {
         logger.info("🌐 Начало индексации сайта: {}", site.getUrl());
         visitedUrls.clear();
         alreadyLogged.clear();
+        ForkJoinPool forkJoinPool = new ForkJoinPool(MAX_THREADS);
         CrawlTask rootTask = new CrawlTask(site.getUrl(), site, 0);
         forkJoinPool.invoke(rootTask);
         logger.info("✅ Индексация завершена. Всего уникальных ресурсов сохранено: {}", visitedUrls.size());
+        return visitedUrls.size(); // Возврат количества страниц
+    }
+
+    public int getVisitedCount() {
         return visitedUrls.size();
     }
+
 
     private class CrawlTask extends RecursiveAction {
         private final String url;
@@ -61,10 +80,19 @@ public class PageCrawlerService {
 
         @Override
         protected void compute() {
-            if (depth > MAX_DEPTH || visitedUrls.contains(url) || !url.startsWith(site.getUrl())) {
-                logger.debug("⏭ Пропуск URL (глубина или дублирование): {}", url);
+            if (depth > MAX_DEPTH) {
+                logger.debug("⏭ Пропуск URL: достигнута максимальная глубина ({}) для {}", MAX_DEPTH, url);
                 return;
             }
+            if (visitedUrls.contains(url)) {
+                logger.debug("⏭ Пропуск URL: уже посещён {}", url);
+                return;
+            }
+            if (!url.startsWith(site.getUrl())) {
+                logger.debug("⏭ Пропуск URL: внешний ресурс {}", url);
+                return;
+            }
+
             visitedUrls.add(url);
 
             try {
@@ -79,6 +107,7 @@ public class PageCrawlerService {
                 logAndSaveErrorPage(site, url, e.getMessage());
             }
         }
+
 
         private void processResponse(Site site, String url, Connection.Response response, int depth) throws IOException {
             String contentType = response.contentType();
@@ -131,15 +160,28 @@ public class PageCrawlerService {
 
     private boolean savePage(Site site, String url, int statusCode, String content) {
         String relativePath = calculateRelativePath(site, url);
+
         synchronized (this) {
             if (pageRepository.existsBySiteAndPath(site, relativePath)) {
-                logOnce("⏭ Уже сохранено: {}", url);
+                logOnce("⏭ Пропуск: уже сохранено в базе данных: {}", url);
                 return false;
             }
+
             Page page = new Page(site, relativePath, statusCode, content);
             pageRepository.save(page);
         }
-        logger.info("✅ Сохранено: {} (Код: {})", url, statusCode);
+
+        // Ясный лог о том, что именно сохранено
+        if (content.startsWith("Телефонный номер")) {
+            logger.info("📞 Сохранён телефонный номер: {} (Код: {})", url, statusCode);
+        } else if (content.startsWith("Изображение типа")) {
+            logger.info("🖼️ Сохранено изображение: {} (Код: {})", url, statusCode);
+        } else if (content.startsWith("Файл типа")) {
+            logger.info("📁 Сохранён файл: {} (Код: {})", url, statusCode);
+        } else {
+            logger.info("📄 Сохранена страница: {} (Код: {})", url, statusCode);
+        }
+
         return true;
     }
 
@@ -168,7 +210,6 @@ public class PageCrawlerService {
 
         savePage(site, url, 500, content);
     }
-
 
     private String calculateRelativePath(Site site, String url) {
         return url.replaceFirst(site.getUrl(), "").replaceAll("^/+", "/");

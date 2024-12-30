@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import searchengine.model.Page;
 import searchengine.model.Site;
 import searchengine.repositories.PageRepository;
+import searchengine.repositories.SiteRepository;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -25,10 +26,12 @@ public class PageCrawlerService {
 
     private static final Logger logger = LoggerFactory.getLogger(PageCrawlerService.class);
     private final PageRepository pageRepository;
+    private final SiteRepository siteRepository;
     private final Set<String> visitedUrls = new HashSet<>();
 
-    public PageCrawlerService(PageRepository pageRepository) {
+    public PageCrawlerService(PageRepository pageRepository, SiteRepository siteRepository) {
         this.pageRepository = pageRepository;
+        this.siteRepository = siteRepository;
     }
 
     public int crawl(Site site) {
@@ -59,6 +62,9 @@ public class PageCrawlerService {
                         .timeout(15000) // Увеличенное время ожидания
                         .followRedirects(true)
                         .execute();
+
+                // Обновляем поле statusTime на каждой итерации обхода
+                updateSiteStatusTime(site);
 
                 processResponse(site, currentUrl, response, urlQueue);
                 savedPagesCount++;
@@ -148,5 +154,14 @@ public class PageCrawlerService {
                 (url.startsWith(baseUrl) || url.startsWith(baseUrl + "/")) &&
                 !url.contains("#") &&
                 !url.matches(".*\\.(css|js|ico|svg|woff|woff2|ttf|eot|mp4|avi|mkv)$");
+    }
+
+    private void updateSiteStatusTime(Site site) {
+        try {
+            siteRepository.updateStatusTime(site.getId());
+            logger.debug("Поле statusTime обновлено для сайта: {}", site.getUrl());
+        } catch (Exception e) {
+            logger.error("Ошибка при обновлении statusTime для сайта {}: {}", site.getUrl(), e.getMessage());
+        }
     }
 }

@@ -113,6 +113,16 @@ public class PageCrawlerService {
         }
 
         private void processResponse(Site site, String url, Connection.Response response, int depth) throws IOException {
+            // Задержка перед обработкой следующего запроса
+            try {
+                long delay = (long) (Math.random() * 4500 + 500); // Задержка от 500 мс до 5 секунд
+                Thread.sleep(delay);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("Обход прерван: {}", e.getMessage());
+                return;
+            }
+
             String contentType = response.contentType();
             String finalUrl = normalizeUrl(response.url().toString());
 

@@ -6,6 +6,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 import searchengine.model.Page;
 import org.springframework.data.jpa.repository.JpaRepository;
+import searchengine.model.Site;
 
 public interface PageRepository extends JpaRepository<Page, Integer> {
 
@@ -16,4 +17,6 @@ public interface PageRepository extends JpaRepository<Page, Integer> {
 
     @Query("SELECT p FROM Page p WHERE p.path = :path AND p.site.id = :siteId")
     Page findByPathAndSiteId(@Param("path") String path, @Param("siteId") Integer siteId);
+
+    boolean existsBySiteAndPath(Site site, String path);
 }

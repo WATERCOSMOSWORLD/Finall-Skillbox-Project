@@ -3,7 +3,6 @@ package searchengine.services;
 import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
-import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,20 +13,25 @@ import searchengine.repositories.PageRepository;
 import searchengine.repositories.SiteRepository;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.util.HashSet;
-import java.util.LinkedList;
-import java.util.Queue;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.RecursiveAction;
 
 @Service
 public class PageCrawlerService {
 
     private static final Logger logger = LoggerFactory.getLogger(PageCrawlerService.class);
+    private static final int MAX_THREADS = Runtime.getRuntime().availableProcessors();
+    private static final int MAX_DEPTH = 10;
+
     private final PageRepository pageRepository;
     private final SiteRepository siteRepository;
-    private final Set<String> visitedUrls = new HashSet<>();
+    private final ForkJoinPool forkJoinPool = new ForkJoinPool(MAX_THREADS);
+    private final Set<String> visitedUrls = ConcurrentHashMap.newKeySet();
+    private final Set<String> alreadyLogged = ConcurrentHashMap.newKeySet(); // Для логирования только один раз
 
     public PageCrawlerService(PageRepository pageRepository, SiteRepository siteRepository) {
         this.pageRepository = pageRepository;
@@ -35,133 +39,148 @@ public class PageCrawlerService {
     }
 
     public int crawl(Site site) {
-        logger.info("=== Начало обхода сайта: {} ===", site.getUrl());
+        logger.info("🌐 Начало индексации сайта: {}", site.getUrl());
         visitedUrls.clear();
-        int savedPages = bfsCrawl(site);
-        logger.info("=== Обход завершен. Сохранено страниц: {} ===", savedPages);
-        return savedPages;
+        alreadyLogged.clear();
+        CrawlTask rootTask = new CrawlTask(site.getUrl(), site, 0);
+        forkJoinPool.invoke(rootTask);
+        logger.info("✅ Индексация завершена. Всего уникальных ресурсов сохранено: {}", visitedUrls.size());
+        return visitedUrls.size();
     }
 
-    private int bfsCrawl(Site site) {
-        Queue<String> urlQueue = new LinkedList<>();
-        urlQueue.add(site.getUrl());
-        int savedPagesCount = 0;
+    private class CrawlTask extends RecursiveAction {
+        private final String url;
+        private final Site site;
+        private final int depth;
 
-        while (!urlQueue.isEmpty()) {
-            String currentUrl = urlQueue.poll();
+        public CrawlTask(String url, Site site, int depth) {
+            this.url = normalizeUrl(url);
+            this.site = site;
+            this.depth = depth;
+        }
 
-            if (visitedUrls.contains(currentUrl)) {
-                logger.debug("Пропущен ранее обработанный URL: {}", currentUrl);
-                continue;
+        @Override
+        protected void compute() {
+            if (depth > MAX_DEPTH || visitedUrls.contains(url) || !url.startsWith(site.getUrl())) {
+                logger.debug("⏭ Пропуск URL (глубина или дублирование): {}", url);
+                return;
             }
-            visitedUrls.add(currentUrl);
+            visitedUrls.add(url);
 
             try {
-                Connection.Response response = Jsoup.connect(currentUrl)
+                Connection.Response response = Jsoup.connect(url)
                         .ignoreContentType(true)
-                        .timeout(15000) // Увеличенное время ожидания
+                        .timeout(15000)
                         .followRedirects(true)
                         .execute();
 
-                // Обновляем поле statusTime на каждой итерации обхода
-                updateSiteStatusTime(site);
-
-                processResponse(site, currentUrl, response, urlQueue);
-                savedPagesCount++;
+                processResponse(site, url, response, depth);
             } catch (IOException e) {
-                logAndSaveErrorPage(site, currentUrl, e.getMessage());
+                logAndSaveErrorPage(site, url, e.getMessage());
             }
         }
-        return savedPagesCount;
-    }
 
-    private void processResponse(Site site, String url, Connection.Response response, Queue<String> urlQueue) throws IOException {
-        int statusCode = response.statusCode();
-        String contentType = response.contentType();
+        private void processResponse(Site site, String url, Connection.Response response, int depth) throws IOException {
+            String contentType = response.contentType();
+            String finalUrl = normalizeUrl(response.url().toString());
 
-        if (contentType != null) {
+            if (!finalUrl.equals(url)) {
+                visitedUrls.add(finalUrl);
+            }
+
+            if (contentType == null) {
+                logger.warn("⚠️ Пропуск: неизвестный тип содержимого (URL: {})", url);
+                return;
+            }
+
             if (contentType.startsWith("text/")) {
                 Document document = response.parse();
-                savePage(site, url, statusCode, document.html());
-                enqueueLinks(site, document, urlQueue);
-            } else if (contentType.startsWith("application/pdf")) {
-                saveFile(site, url, statusCode, response.bodyAsBytes(), "pdf");
+                savePage(site, finalUrl, response.statusCode(), document.html());
+                logger.info("📄 Проиндексирована страница: {}", url);
+
+                Elements links = document.select("a[href]");
+                List<CrawlTask> tasks = new ArrayList<>();
+                for (var link : links) {
+                    String nextUrl = normalizeUrl(link.absUrl("href"));
+                    if (nextUrl.startsWith("tel:")) {
+                        processPhoneNumber(site, nextUrl);
+                    } else if (!visitedUrls.contains(nextUrl)) {
+                        tasks.add(new CrawlTask(nextUrl, site, depth + 1));
+                    }
+                }
+                invokeAll(tasks);
             } else if (contentType.startsWith("image/")) {
-                saveFile(site, url, statusCode, response.bodyAsBytes(), "images");
+                savePage(site, finalUrl, response.statusCode(), "Изображение типа " + contentType);
+                logger.info("🖼️ Проиндексировано изображение: {}", url);
+            } else if (isSupportedFileType(contentType)) {
+                savePage(site, finalUrl, response.statusCode(), "Файл типа " + contentType);
+                logger.info("📁 Проиндексирован файл: {}", url);
             } else {
-                logger.warn("Пропущен неподдерживаемый тип контента: {} для URL {}", contentType, url);
+                logger.info("⏭ Пропуск файла с неподдерживаемым типом: {}", contentType);
             }
-        } else {
-            logger.warn("Пропущен URL без типа контента: {}", url);
         }
-    }
 
-    private void enqueueLinks(Site site, Document document, Queue<String> urlQueue) {
-        Elements links = document.select("a[href]");
-        logger.debug("Обнаружено ссылок на странице {}: {}", site.getUrl(), links.size());
-
-        for (Element link : links) {
-            String nextUrl = link.absUrl("href");
-            if (isValidUrl(nextUrl, site.getUrl())) {
-                urlQueue.add(nextUrl);
-                logger.debug("Добавлен в очередь URL: {}", nextUrl);
-            } else {
-                logger.debug("Пропущен URL: {}", nextUrl);
-            }
+        private boolean isSupportedFileType(String contentType) {
+            return contentType.equals("application/pdf") ||
+                    contentType.equals("application/msword") ||
+                    contentType.equals("application/vnd.openxmlformats-officedocument.wordprocessingml.document") ||
+                    contentType.equals("application/vnd.ms-excel") ||
+                    contentType.equals("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         }
     }
 
     private boolean savePage(Site site, String url, int statusCode, String content) {
         String relativePath = calculateRelativePath(site, url);
-        Page page = new Page(site, relativePath, statusCode, content);
-        pageRepository.save(page);
-        logger.info("Сохранена страница: {} (код: {})", url, statusCode);
+        synchronized (this) {
+            if (pageRepository.existsBySiteAndPath(site, relativePath)) {
+                logOnce("⏭ Уже сохранено: {}", url);
+                return false;
+            }
+            Page page = new Page(site, relativePath, statusCode, content);
+            pageRepository.save(page);
+        }
+        logger.info("✅ Сохранено: {} (Код: {})", url, statusCode);
         return true;
     }
 
-    private boolean saveFile(Site site, String url, int statusCode, byte[] content, String folder) {
-        String relativePath = calculateRelativePath(site, url, folder);
 
-        try {
-            Files.createDirectories(Paths.get(relativePath).getParent());
-            Files.write(Paths.get(relativePath), content);
-            logger.info("Сохранён файл: {} (код: {}, папка: {})", url, statusCode, folder);
-            savePage(site, url, statusCode, "Файл сохранён: " + relativePath);
-            return true;
-        } catch (IOException e) {
-            logger.error("Ошибка при сохранении файла {}: {}", url, e.getMessage(), e);
-            return false;
+    private void processPhoneNumber(Site site, String phoneUrl) {
+        String phoneNumber = phoneUrl.replace("tel:", "");
+        String content = "Телефонный номер: " + phoneNumber;
+        synchronized (this) {
+            if (pageRepository.existsBySiteAndPath(site, phoneUrl)) {
+                logOnce("⏭ Номер телефона уже сохранён: {}", phoneNumber);
+                return;
+            }
+            savePage(site, phoneUrl, 200, content);
         }
+        logger.info("📞 Найден номер телефона: {}", phoneNumber);
     }
 
     private void logAndSaveErrorPage(Site site, String url, String errorMessage) {
         String content = "Ошибка при загрузке страницы: " + errorMessage;
+        logger.error("❌ Ошибка при обработке URL: {} (Причина: {})", url, errorMessage);
+
+        if (errorMessage.contains("Status=404")) {
+            logger.warn("⚠️ Ресурс не найден (404): {}", url);
+            return; // Не сохраняем в случае ошибки 404
+        }
+
         savePage(site, url, 500, content);
-        logger.error("Ошибка при обработке URL {}: {}", url, errorMessage);
     }
+
 
     private String calculateRelativePath(Site site, String url) {
-        return calculateRelativePath(site, url, "/");
+        return url.replaceFirst(site.getUrl(), "").replaceAll("^/+", "/");
     }
 
-    private String calculateRelativePath(Site site, String url, String defaultPath) {
-        String relativePath = url.replaceFirst(site.getUrl(), "").replaceAll("^/+", "/");
-        return relativePath.isEmpty() ? defaultPath : defaultPath + relativePath;
+    private String normalizeUrl(String url) {
+        return url.replaceAll("/+$", "").toLowerCase();
     }
 
-    private boolean isValidUrl(String url, String baseUrl) {
-        return url != null &&
-                (url.startsWith(baseUrl) || url.startsWith(baseUrl + "/")) &&
-                !url.contains("#") &&
-                !url.matches(".*\\.(css|js|ico|svg|woff|woff2|ttf|eot|mp4|avi|mkv)$");
-    }
-
-    private void updateSiteStatusTime(Site site) {
-        try {
-            siteRepository.updateStatusTime(site.getId());
-            logger.debug("Поле statusTime обновлено для сайта: {}", site.getUrl());
-        } catch (Exception e) {
-            logger.error("Ошибка при обновлении statusTime для сайта {}: {}", site.getUrl(), e.getMessage());
+    private void logOnce(String message, String detail) {
+        if (alreadyLogged.add(detail)) {
+            logger.info(message, detail);
         }
     }
 }

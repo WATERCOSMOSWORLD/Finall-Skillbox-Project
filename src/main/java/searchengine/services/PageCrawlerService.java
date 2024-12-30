@@ -31,6 +31,9 @@ public class PageCrawlerService {
     private final Set<String> visitedUrls = ConcurrentHashMap.newKeySet();
     private final Set<String> alreadyLogged = ConcurrentHashMap.newKeySet(); // Для логирования только один раз
 
+    private static final String FAKE_USER_AGENT = "Mozilla/5.0 (Windows; U; WindowsNT 5.1; en-US; rv1.8.1.6) Gecko/20070725 Firefox/2.0.0.6";
+    private static final String FAKE_REFERRER = "http://www.google.com";
+
     public PageCrawlerService(PageRepository pageRepository, SiteRepository siteRepository) {
         this.pageRepository = pageRepository;
         this.siteRepository = siteRepository;
@@ -66,7 +69,6 @@ public class PageCrawlerService {
         return visitedUrls.size();
     }
 
-
     private class CrawlTask extends RecursiveAction {
         private final String url;
         private final Site site;
@@ -97,6 +99,8 @@ public class PageCrawlerService {
 
             try {
                 Connection.Response response = Jsoup.connect(url)
+                        .userAgent(FAKE_USER_AGENT)
+                        .referrer(FAKE_REFERRER)
                         .ignoreContentType(true)
                         .timeout(15000)
                         .followRedirects(true)
@@ -107,7 +111,6 @@ public class PageCrawlerService {
                 logAndSaveErrorPage(site, url, e.getMessage());
             }
         }
-
 
         private void processResponse(Site site, String url, Connection.Response response, int depth) throws IOException {
             String contentType = response.contentType();
@@ -171,7 +174,6 @@ public class PageCrawlerService {
             pageRepository.save(page);
         }
 
-        // Ясный лог о том, что именно сохранено
         if (content.startsWith("Телефонный номер")) {
             logger.info("📞 Сохранён телефонный номер: {} (Код: {})", url, statusCode);
         } else if (content.startsWith("Изображение типа")) {
@@ -184,7 +186,6 @@ public class PageCrawlerService {
 
         return true;
     }
-
 
     private void processPhoneNumber(Site site, String phoneUrl) {
         String phoneNumber = phoneUrl.replace("tel:", "");
@@ -201,15 +202,27 @@ public class PageCrawlerService {
 
     private void logAndSaveErrorPage(Site site, String url, String errorMessage) {
         String content = "Ошибка при загрузке страницы: " + errorMessage;
-        logger.error("❌ Ошибка при обработке URL: {} (Причина: {})", url, errorMessage);
 
+        // Проверяем на распространённые коды ошибок
         if (errorMessage.contains("Status=404")) {
             logger.warn("⚠️ Ресурс не найден (404): {}", url);
             return; // Не сохраняем в случае ошибки 404
+        } else if (errorMessage.contains("Status=403")) {
+            logger.warn("🚫 Доступ к ресурсу запрещён (403): {}", url);
+        } else if (errorMessage.contains("Status=500")) {
+            logger.error("💥 Внутренняя ошибка сервера (500): {}", url);
+        } else if (errorMessage.contains("ConnectException")) {
+            logger.error("🌐 Ошибка соединения с ресурсом: {}", url);
+        } else if (errorMessage.contains("SocketTimeoutException")) {
+            logger.warn("⏳ Тайм-аут подключения к ресурсу: {}", url);
+        } else {
+            logger.error("❌ Неизвестная ошибка при обработке URL: {} (Причина: {})", url, errorMessage);
         }
 
+        // Сохраняем страницу с ошибкой для всех случаев, кроме 404
         savePage(site, url, 500, content);
     }
+
 
     private String calculateRelativePath(Site site, String url) {
         return url.replaceFirst(site.getUrl(), "").replaceAll("^/+", "/");
